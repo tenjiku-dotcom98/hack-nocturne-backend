@@ -82,18 +82,18 @@ class AIService:
             url_analysis = self._analyze_url(url)
             if url_analysis["status"] in ["scam", "suspicious", "caution"]:
                 flagged_urls.append(url)
-
+        
         # Calculate base scam score from keywords
         keyword_score = min(len(flagged_keywords) * 15, 60)
         
         # Add URL risk score
         url_score = 0
         if url_analysis["status"] == "scam":
-            url_score = 40
-        elif url_analysis["status"] == "suspicious":
             url_score = 30
+        elif url_analysis["status"] == "suspicious":
+            url_score = 20
         elif url_analysis["status"] == "caution":
-            url_score = 15
+            url_score = 10
         
         # Urgency and pressure tactics
         urgency_patterns = [
@@ -111,14 +111,6 @@ class AIService:
         
         # Calculate total scam score
         scam_score = min(keyword_score + url_score + urgency_score + info_score, 100)
-
-        # If the URL alone is classified as scam/suspicious, ensure the overall score reflects that
-        if url_analysis["status"] == "scam":
-            scam_score = max(scam_score, 85)
-        elif url_analysis["status"] == "suspicious":
-            scam_score = max(scam_score, 65)
-        elif url_analysis["status"] == "caution":
-            scam_score = max(scam_score, 45)
         
         # Determine risk level
         if scam_score >= 80:
