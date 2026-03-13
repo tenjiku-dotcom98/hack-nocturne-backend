@@ -1,0 +1,150 @@
+"""
+web3_service.py
+Sole responsibility: talk to the Polygon Amoy blockchain.
+No AI logic. No routes. Just Web3.
+Requires CONTRACT_ADDRESS and ABI from Person 1 before testing.
+"""
+
+import os
+import json
+import time
+from web3 import Web3
+from web3.middleware import ExtraDataToPOAMiddleware
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Connection setup
+# ---------------------------------------------------------------------------
+
+ALCHEMY_URL       = os.getenv("ALCHEMY_AMOY_URL")
+CONTRACT_ADDRESS  = os.getenv("CONTRACT_ADDRESS")
+PRIVATE_KEY       = os.getenv("BACKEND_PRIVATE_KEY")
+
+# Placeholder ABI — replace with the real ABI JSON from Person 1.
+# Must include at minimum: communityReport() and getAllReports()
+CONTRACT_ABI = json.loads(os.getenv("CONTRACT_ABI", "[]"))
+
+def _get_web3() -> Web3:
+    if not ALCHEMY_URL:
+        raise EnvironmentError("ALCHEMY_AMOY_URL is not set in .env")
+    w3 = Web3(Web3.HTTPProvider(ALCHEMY_URL))
+    # Polygon PoA chain requires this middleware
+    w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+    if not w3.is_connected():
+        raise ConnectionError("Cannot connect to Polygon Amoy. Check ALCHEMY_AMOY_URL.")
+    return w3
+
+def _get_contract(w3: Web3):
+    if not CONTRACT_ADDRESS:
+        raise EnvironmentError("CONTRACT_ADDRESS is not set in .env — waiting for Person 1.")
+    if not CONTRACT_ABI:
+        raise EnvironmentError("CONTRACT_ABI is not set in .env — waiting for Person 1.")
+    return w3.eth.contract(
+        address=Web3.to_checksum_address(CONTRACT_ADDRESS),
+        abi=CONTRACT_ABI,
+    )
+
+def _get_wallet(w3: Web3):
+    if not PRIVATE_KEY:
+        raise EnvironmentError("BACKEND_PRIVATE_KEY is not set in .env")
+    return w3.eth.account.from_key(PRIVATE_KEY)
+
+
+# ---------------------------------------------------------------------------
+# Public functions
+# ---------------------------------------------------------------------------
+
+def submit_report(text: str, category: str, risk_score: int) -> str:
+    """
+    Hash `text` with keccak256, then call communityReport() on the contract.
+
+    Args:
+        text:       The original suspicious message
+        category:   Scam category string from ai_analyzer
+        risk_score: 0–100 integer from ai_analyzer
+
+    Returns:
+        txHash as a hex string (0x...)
+
+    Raises:
+        EnvironmentError if env vars are missing
+        Exception on transaction failure
+    """
+    w3       = _get_web3()
+    contract = _get_contract(w3)
+    wallet   = _get_wallet(w3)
+
+    # Hash the text — stores a fingerprint, not the raw message
+    text_hash = w3.keccak(text=text)
+
+    # Build transaction
+    nonce = w3.eth.get_transaction_count(wallet.address)
+    tx    = contract.functions.communityReport(
+        text_hash,
+        category,
+        risk_score,
+    ).build_transaction({
+        "from":     wallet.address,
+        "nonce":    nonce,
+        "gas":      300_000,
+        "gasPrice": w3.eth.gas_price,
+        "chainId":  80002,   # Polygon Amoy chain ID
+    })
+
+    # Sign and send
+    signed   = w3.eth.account.sign_transaction(tx, private_key=PRIVATE_KEY)
+    tx_hash  = w3.eth.send_raw_transaction(signed.raw_transaction)
+
+    # Wait for confirmation (up to 60 s)
+    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+    if receipt.status != 1:
+        raise RuntimeError(f"Transaction reverted. Receipt: {receipt}")
+
+    return tx_hash.hex()
+
+
+def get_all_reports() -> list[dict]:
+    """
+    Call getAllReports() on the contract and return a cleaned list.
+
+    Returns:
+        [
+            {
+                "reporter":   "0x...",
+                "textHash":   "0x...",
+                "category":   "phishing",
+                "riskScore":  85,
+                "timestamp":  1712345678,
+            },
+            ...
+        ]
+    """
+    w3       = _get_web3()
+    contract = _get_contract(w3)
+
+    raw_reports = contract.functions.getAllReports().call()
+
+    formatted = []
+    for r in raw_reports:
+        # Adjust index positions to match your actual contract struct order
+        formatted.append({
+            "reporter":  r[0],
+            "textHash":  r[1].hex() if isinstance(r[1], bytes) else r[1],
+            "category":  r[2],
+            "riskScore": r[3],
+            "timestamp": r[4],
+        })
+
+    return formatted
+
+
+# ---------------------------------------------------------------------------
+# Quick smoke-test  →  python web3_service.py
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    print("Testing get_all_reports() — read-only, no gas needed...")
+    reports = get_all_reports()
+    print(f"Found {len(reports)} report(s):")
+    print(json.dumps(reports, indent=2))
